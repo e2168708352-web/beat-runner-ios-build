@@ -1,0 +1,97 @@
+name: Build unsigned BEAT RUNNER iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Source git ref (branch, tag, or commit SHA)"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build unsigned iOS IPA
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout BEAT RUNNER
+        uses: actions/checkout@v4
+        with:
+          repository: alexngdev99/rork-subway-surfers-clone
+          ref: ${{ github.event.inputs.source_ref }}
+          path: src
+          fetch-depth: 1
+
+      - name: Record source provenance
+        working-directory: src
+        run: |
+          git rev-parse HEAD | tee "$GITHUB_WORKSPACE/source-commit.txt"
+          git log -1 --format='%H%n%ci%n%s' | tee "$GITHUB_WORKSPACE/source-commit-info.txt"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build for device without signing
+        working-directory: src
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/RailRush.xcodeproj \
+            -target RailRush \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tee build.log
+
+      - name: Package unsigned IPA
+        working-directory: src
+        run: |
+          set -euo pipefail
+          APP=$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -type d -name "*.app" | head -n1)
+          echo "APP=$APP"
+          test -n "$APP"
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/beat-runner-unsigned.ipa"
+          cd "$GITHUB_WORKSPACE"
+          shasum -a 256 beat-runner-unsigned.ipa | tee beat-runner-unsigned.ipa.sha256
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$GITHUB_WORKSPACE/$APP/Info.plist" | tee bundle-id.txt
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$GITHUB_WORKSPACE/$APP/Info.plist" | tee version.txt
+          unzip -l beat-runner-unsigned.ipa | tee ipa-contents.txt
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: beat-runner-unsigned-ipa
+          path: |
+            beat-runner-unsigned.ipa
+            beat-runner-unsigned.ipa.sha256
+            source-commit.txt
+            source-commit-info.txt
+            bundle-id.txt
+            version.txt
+            ipa-contents.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: src/build.log
+          if-no-files-found: ignore
+          retention-days: 7
